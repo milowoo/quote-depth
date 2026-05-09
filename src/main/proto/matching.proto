@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package com.quote.depth.proto;
+
+option java_package = "com.quote.depth.proto";
+option java_outer_classname = "DepthProto";
+option java_multiple_files = false;
+
+message PbDepthUpdate {
+  string symbol_id = 1;
+  string type = 2;               // SNAPSHOT or INCREMENTAL
+  repeated PbPriceLevel bids = 3;
+  repeated PbPriceLevel asks = 4;
+  int64 timestamp = 5;
+  int64 trace_id = 6;            // monotonically increasing, for downstream filtering
+}
+
+message PbPriceLevel {
+  string price = 1;
+  string quantity = 2;
+  int32 order_count = 3;
+}

@@ -1,0 +1,20 @@
+server:
+  port: 8081
+
+spring:
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+depth:
+  kafka:
+    topic: ${DEPTH_KAFKA_TOPIC:depth-updates}
+    consumer:
+      group-id: quote-depth-group
+  snapshot:
+    max-levels: 100
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{30} - %msg%n"
+  level:
+    com.quote.depth: INFO
