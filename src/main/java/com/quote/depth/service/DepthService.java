@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
+import org.springframework.context.annotation.Lazy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,7 +48,7 @@ public class DepthService {
     @Value("${depth.snapshot.max-levels:100}")
     private int maxSnapshotLevels;
 
-    public DepthService(DepthWebSocketHandler webSocketHandler) {
+    public DepthService(@Lazy DepthWebSocketHandler webSocketHandler) {
         this.webSocketHandler = webSocketHandler;
     }
 
