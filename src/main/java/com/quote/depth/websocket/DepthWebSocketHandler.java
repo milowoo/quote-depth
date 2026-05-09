@@ -65,19 +65,29 @@ public class DepthWebSocketHandler extends TextWebSocketHandler {
         try {
             Map<String, String> msg = MAPPER.readValue(message.getPayload(), Map.class);
             String action = msg.get("action");
-            String symbol = msg.get("symbol");
+            String symbolsRaw = msg.get("symbols");
 
-            if (symbol == null || symbol.isBlank()) {
-                sendError(session, "missing symbol");
+            if (symbolsRaw == null || symbolsRaw.isBlank()) {
+                sendError(session, "missing symbols");
                 return;
             }
-            symbol = symbol.trim().toUpperCase();
 
-            if ("subscribe".equalsIgnoreCase(action)) {
-                subscribe(session, symbol);
-            } else if ("unsubscribe".equalsIgnoreCase(action)) {
-                unsubscribe(session, symbol);
-            } else {
+            // Support batch subscription: comma-separated symbols
+            String[] symbols = symbolsRaw.split(",");
+            boolean hasValid = false;
+            for (String s : symbols) {
+                s = s.trim().toUpperCase();
+                if (s.isEmpty()) continue;
+                hasValid = true;
+                if ("subscribe".equalsIgnoreCase(action)) {
+                    subscribe(session, s);
+                } else if ("unsubscribe".equalsIgnoreCase(action)) {
+                    unsubscribe(session, s);
+                }
+            }
+            if (!hasValid) {
+                sendError(session, "no valid symbols provided");
+            } else if (!"subscribe".equalsIgnoreCase(action) && !"unsubscribe".equalsIgnoreCase(action)) {
                 sendError(session, "unknown action: " + action);
             }
         } catch (Exception e) {
@@ -90,6 +100,15 @@ public class DepthWebSocketHandler extends TextWebSocketHandler {
     private void subscribe(WebSocketSession session, String symbol) {
         if (isSubscribed(session, symbol)) {
             log.info("Already subscribed: sessionId={}, symbol={}", session.getId(), symbol);
+            return;
+        }
+
+        // Do not accept subscriptions until the first depth SNAPSHOT has
+        // arrived from Kafka — without it the cache is empty and the
+        // subscriber would receive nothing useful.
+        if (!depthService.isWarm()) {
+            sendError(session, "service warming up — no depth data yet, please retry shortly");
+            log.info("Rejected subscribe (not warm): sessionId={}, symbol={}", session.getId(), symbol);
             return;
         }
 

@@ -11,9 +11,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Orchestrator for depth data processing.
@@ -39,11 +41,24 @@ public class DepthService {
 
     private final DepthWebSocketHandler webSocketHandler;
 
+    /** True once the first depth SNAPSHOT has been received from Kafka. */
+    private final AtomicBoolean warm = new AtomicBoolean(false);
+
     @Value("${depth.snapshot.max-levels:100}")
     private int maxSnapshotLevels;
 
     public DepthService(DepthWebSocketHandler webSocketHandler) {
         this.webSocketHandler = webSocketHandler;
+    }
+
+    /** Whether the service has received at least one depth snapshot. */
+    public boolean isWarm() {
+        return warm.get();
+    }
+
+    @PostConstruct
+    void logWarmStatus() {
+        log.info("DepthService started — waiting for first SNAPSHOT from Kafka before marking ready");
     }
 
     /** Exposed so {@code DepthWebSocketHandler} can synchronise subscription changes. */
@@ -78,6 +93,10 @@ public class DepthService {
 
                 if ("SNAPSHOT".equalsIgnoreCase(type)) {
                     cache.applySnapshot(bids, asks, timestamp, traceId);
+                    if (warm.compareAndSet(false, true)) {
+                        log.info("First SNAPSHOT received for symbol={}, traceId={} — service is now ready",
+                                symbol, traceId);
+                    }
                 } else {
                     cache.applyIncrement(bids, asks, timestamp, traceId);
                 }

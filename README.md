@@ -69,6 +69,107 @@ subscribe(session, "BTCUSDT")
 
 ---
 
+## 多节点部署
+
+本服务设计为**无状态水平扩展**，每个节点独立运行完整的 DepthCache，节点之间无需共享状态。
+
+### 部署拓扑
+
+```
+                        ┌──────────────┐
+                        │   Kafka      │
+                        │ depth-updates│
+                        └──────┬───────┘
+                  ┌──────────────┼──────────────┐
+                  ▼              ▼              ▼
+           ┌──────────┐  ┌──────────┐  ┌──────────┐
+           │ Node 1   │  │ Node 2   │  │ Node 3   │
+           │ :8081    │  │ :8082    │  │ :8083    │
+           └────┬─────┘  └────┬─────┘  └────┬─────┘
+                │             │             │
+                └─────────────┴─────────────┘
+                     LB (负载均衡)
+                      │
+                 WebSocket 客户端
+```
+
+### Consumer Group 策略
+
+**每个节点必须使用独立的 consumer group**（通过 `depth.kafka.consumer.group-id` 或环境变量 `$INSTANCE_ID` 区分），否则 Kafka 会将 partition 分散到不同节点，导致每个节点只收到部分 symbol 的数据：
+
+```yaml
+depth:
+  kafka:
+    consumer:
+      group-id: quote-depth-group-${INSTANCE_ID:0}
+```
+
+```bash
+# 启动节点 1
+INSTANCE_ID=1 java -jar target/quote-depth.jar
+
+# 启动节点 2
+INSTANCE_ID=2 java -jar target/quote-depth.jar
+```
+
+启动后每个节点都会消费 **depth-updates topic 的所有 partition**，各自维护一份完整的 DepthCache。
+
+> **为什么不能用共享 group？** Kafka 的 consumer group 机制会将 topic partition 分配给组内成员。如果两个节点使用同一个 group id，Kafka 会将 partition 分散到两个节点，每个节点只消费部分 symbol 的数据，导致客户端随机连到一个节点时可能查不到目标 symbol 的 depth。
+
+### 服务启动与 Warmup
+
+服务启动后**不会立即对外服务**，而是等待 Kafka 消费到首轮 SNAPSHOT 消息后才标记为 READY：
+
+```
+启动                         首轮 SNAPSHOT 到达           后续 SNAPSHOT
+  │                               │                           │
+  ▼                               ▼                           ▼
+┌──────┐   health=DOWN        ┌──────┐   health=UP         ┌──────┐
+│WARMUP│─────────────────────►│ LIVE │────────────────────►│ LIVE │
+└──────┘   WS 拒绝订阅         └──────┘   WS 正常订阅        └──────┘
+```
+
+- **Warmup 期间**：`GET /actuator/health` 返回 `{"status":"DOWN","reason":"waiting for first SNAPSHOT from Kafka"}`，WebSocket 订阅返回 `{"error":"service warming up ..."}`
+- **Warmup 完成**：首轮 SNAPSHOT 被消费后立即切为 UP，开始正常服务
+- **典型等待时间**：≤ 撮合引擎的 snapshot 推送间隔（默认 30 秒）
+
+此机制确保 LB 不会将流量分发到尚未就绪的节点：
+
+```
+# 配合 K8s readinessProbe
+readinessProbe:
+  httpGet:
+    path: /actuator/health
+    port: 8081
+  initialDelaySeconds: 0
+  periodSeconds: 5
+```
+
+由于撮合引擎定时推送 SNAPSHOT，单节点重启的不可用窗口被严格限制在 snapshot 间隔之内。多节点部署时，滚动重启不会影响整体服务可用性。
+
+### 负载均衡
+
+WebSocket 连接建议使用 **4 层（TCP）负载均衡**，避免 7 层解析增加延迟：
+
+```
+# HAProxy 示例
+frontend depth-ws
+    bind *:8081
+    default_backend depth-nodes
+
+backend depth-nodes
+    balance roundrobin
+    server node1 10.0.0.1:8081 check
+    server node2 10.0.0.2:8081 check
+    server node3 10.0.0.3:8081 check
+```
+
+### 节点扩缩容
+
+- **扩容**：直接启动新节点（独立 group id），无需预热，启动后自动从 Kafka 消费 SNAPSHOT 恢复
+- **缩容**：直接停止节点，客户端 WS 连接断开后重连到其他节点即可
+- 无状态设计使扩缩容对现有连接无影响（断开连接的客户端由 LB 分发到存活节点自动重建 DepthCache）
+
 ## 启动
 
 ### 依赖
@@ -118,14 +219,20 @@ ws://<host>:8081/depth
 
 ### 订阅
 
+支持单个或批量订阅（逗号分隔）：
+
 ```json
-{"action": "subscribe", "symbol": "BTCUSDT"}
+{"action": "subscribe", "symbols": "BTCUSDT,ETHUSDT,SOLUSDT"}
+```
+
+```json
+{"action": "subscribe", "symbols": "BTCUSDT"}
 ```
 
 ### 取消订阅
 
 ```json
-{"action": "unsubscribe", "symbol": "BTCUSDT"}
+{"action": "unsubscribe", "symbols": "BTCUSDT,ETHUSDT"}
 ```
 
 ### 收到消息格式
@@ -163,7 +270,7 @@ ws://<host>:8081/depth
 ```bash
 # 连接并订阅 BTCUSDT
 websocat ws://localhost:8081/depth
-{"action":"subscribe","symbol":"BTCUSDT"}
+{"action":"subscribe","symbols":"BTCUSDT"}
 ```
 
 ### JavaScript (浏览器)
@@ -172,7 +279,7 @@ websocat ws://localhost:8081/depth
 const ws = new WebSocket('ws://localhost:8081/depth');
 
 ws.onopen = () => {
-    ws.send(JSON.stringify({action: 'subscribe', symbol: 'BTCUSDT'}));
+    ws.send(JSON.stringify({action: 'subscribe', symbols: 'BTCUSDT'}));
 };
 
 ws.onmessage = (event) => {
@@ -192,7 +299,7 @@ import json
 
 async def subscribe():
     async with websockets.connect('ws://localhost:8081/depth') as ws:
-        await ws.send(json.dumps({"action": "subscribe", "symbol": "BTCUSDT"}))
+        await ws.send(json.dumps({"action": "subscribe", "symbols": "BTCUSDT"}))
         async for msg in ws:
             data = json.loads(msg)
             print(f"{data['type']} | bids={data['bidLevels']} asks={data['askLevels']}")
@@ -218,7 +325,7 @@ client.doHandshake(new TextWebSocketHandler() {
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         session.sendMessage(new TextMessage(
-            "{\"action\":\"subscribe\",\"symbol\":\"BTCUSDT\"}"
+            "{\"action\":\"subscribe\",\"symbols\":\"BTCUSDT\"}"
         ));
     }
     @Override
