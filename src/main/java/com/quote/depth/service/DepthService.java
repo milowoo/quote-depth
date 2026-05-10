@@ -1,6 +1,7 @@
 package com.quote.depth.service;
 
 import com.quote.depth.cache.DepthCache;
+import com.quote.depth.config.DepthMetrics;
 import com.quote.depth.model.DepthEntry;
 import com.quote.depth.model.DepthMessage;
 import com.quote.depth.proto.DepthProto.PbDepthUpdate;
@@ -41,6 +42,7 @@ public class DepthService {
     private final ConcurrentHashMap<String, Object> symbolLocks = new ConcurrentHashMap<>();
 
     private final DepthWebSocketHandler webSocketHandler;
+    private final DepthMetrics depthMetrics;
 
     /** True once the first depth SNAPSHOT has been received from Kafka. */
     private final AtomicBoolean warm = new AtomicBoolean(false);
@@ -48,8 +50,9 @@ public class DepthService {
     @Value("${depth.snapshot.max-levels:100}")
     private int maxSnapshotLevels;
 
-    public DepthService(@Lazy DepthWebSocketHandler webSocketHandler) {
+    public DepthService(@Lazy DepthWebSocketHandler webSocketHandler, DepthMetrics depthMetrics) {
         this.webSocketHandler = webSocketHandler;
+        this.depthMetrics = depthMetrics;
     }
 
     /** Whether the service has received at least one depth snapshot. */
@@ -58,8 +61,9 @@ public class DepthService {
     }
 
     @PostConstruct
-    void logWarmStatus() {
+    void init() {
         log.info("DepthService started — waiting for first SNAPSHOT from Kafka before marking ready");
+        depthMetrics.reportCachedSymbolCount(this::cachedSymbolCount);
     }
 
     /** Exposed so {@code DepthWebSocketHandler} can synchronise subscription changes. */
@@ -78,6 +82,7 @@ public class DepthService {
      * from blocking other operations on the same symbol.
      */
     public void processUpdate(byte[] payload) {
+        long startNanos = System.nanoTime();
         try {
             PbDepthUpdate pb = PbDepthUpdate.parseFrom(payload);
             String symbol = pb.getSymbolId();
@@ -90,7 +95,14 @@ public class DepthService {
 
             DepthMessage message;
             synchronized (getLock(symbol)) {
-                DepthCache cache = caches.computeIfAbsent(symbol, DepthCache::new);
+                DepthCache cache = caches.computeIfAbsent(symbol, s -> {
+                    DepthCache newCache = new DepthCache(s);
+                    // Register cache-level gauges on first appearance of this symbol
+                    depthMetrics.registerCacheGauges(s,
+                            () -> newCache.bidLevels(),
+                            () -> newCache.askLevels());
+                    return newCache;
+                });
 
                 if ("SNAPSHOT".equalsIgnoreCase(type)) {
                     cache.applySnapshot(bids, asks, timestamp, traceId);
@@ -111,6 +123,8 @@ public class DepthService {
             }
 
             webSocketHandler.broadcast(message);
+
+            depthMetrics.recordUpdate(symbol, type, System.nanoTime() - startNanos);
 
         } catch (Exception e) {
             log.error("Failed to process depth update", e);

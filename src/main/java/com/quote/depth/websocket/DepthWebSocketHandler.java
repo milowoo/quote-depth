@@ -1,6 +1,7 @@
 package com.quote.depth.websocket;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.quote.depth.config.DepthMetrics;
 import com.quote.depth.model.DepthMessage;
 import com.quote.depth.service.DepthService;
 import org.slf4j.Logger;
@@ -37,6 +38,7 @@ public class DepthWebSocketHandler extends TextWebSocketHandler {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final DepthService depthService;
+    private final DepthMetrics depthMetrics;
 
     /** symbol -> set of sessions subscribed to that symbol. */
     private final Map<String, KeySetView<WebSocketSession, Boolean>> subscriptions = new ConcurrentHashMap<>();
@@ -50,8 +52,12 @@ public class DepthWebSocketHandler extends TextWebSocketHandler {
     /** Messages buffered for sessions still in catch-up. */
     private final Map<WebSocketSession, ConcurrentLinkedDeque<DepthMessage>> catchupBuffers = new ConcurrentHashMap<>();
 
-    public DepthWebSocketHandler(DepthService depthService) {
+    /** Tracks which symbols already have subscriber gauges registered. */
+    private final Set<String> gaugedSymbols = ConcurrentHashMap.newKeySet();
+
+    public DepthWebSocketHandler(DepthService depthService, DepthMetrics depthMetrics) {
         this.depthService = depthService;
+        this.depthMetrics = depthMetrics;
     }
 
     @Override
@@ -126,6 +132,11 @@ public class DepthWebSocketHandler extends TextWebSocketHandler {
             catchingUp.add(session);
             subscriptions.computeIfAbsent(symbol, k -> ConcurrentHashMap.newKeySet()).add(session);
             sessionSymbols.computeIfAbsent(session, k -> ConcurrentHashMap.newKeySet()).add(symbol);
+        }
+
+        // Register subscriber gauge on first subscription for this symbol
+        if (gaugedSymbols.add(symbol)) {
+            depthMetrics.registerSubscriberGauge(symbol, () -> getSubscriptionCount(symbol));
         }
 
         // Snapshot and buffered-increment send happens OUTSIDE the lock

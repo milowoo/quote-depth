@@ -18,3 +18,12 @@ logging:
     console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{30} - %msg%n"
   level:
     com.quote.depth: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  metrics:
+    tags:
+      application: quote-depth

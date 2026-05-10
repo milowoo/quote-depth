@@ -367,3 +367,83 @@ mvn test
 ```
 
 现有 14 个单元测试覆盖 DepthCache：快照/增量、价格排序、档位限制、traceId 记录、并发安全。
+
+---
+
+## 监控 & 可观测性
+
+本服务集成 **Micrometer** 指标库，通过 Spring Boot Actuator 暴露度量数据，支持 Prometheus 拉取。
+
+### 端点
+
+| 路径 | 说明 |
+|------|------|
+| `GET /actuator/health` | 健康检查（含 warmup 状态） |
+| `GET /actuator/metrics` | 查看所有可用指标 |
+| `GET /actuator/prometheus` | Prometheus 格式指标（需配置 scrape） |
+
+### 指标清单
+
+| 指标名 | 类型 | 标签 | 说明 |
+|--------|------|------|------|
+| `depth.updates` | Counter | `symbol`, `type` | 已处理的 depth 更新总数，按交易对和类型（SNAPSHOT / INCREMENTAL）区分 |
+| `depth.update.latency` | Timer | `symbol` | 从 Kafka 消息到达到广播完成的端到端处理延迟，含 P50/P95/P99 百分位 |
+| `depth.cache.bid.levels` | Gauge | `symbol` | 当前缓存中买盘价格档位数 |
+| `depth.cache.ask.levels` | Gauge | `symbol` | 当前缓存中卖盘价格档位数 |
+| `depth.subscribers` | Gauge | `symbol` | 当前订阅该交易对的 WebSocket 连接数 |
+| `depth.symbols.cached` | Gauge | 无 | 有活跃 depth 缓存的交易对总数 |
+
+### Prometheus 配置
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'quote-depth'
+    scrape_interval: 10s
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - 'node1:8081'
+          - 'node2:8081'
+          - 'node3:8081'
+```
+
+### Grafana 面板建议
+
+以下 PromQL 查询可用于构建实时监控面板：
+
+```promql
+# 各交易对每秒更新速率
+sum by (symbol) (rate(depth_updates_total[1m]))
+
+# P99 处理延迟
+depth_update_latency_seconds{p99="0.99"}
+
+# 订阅数 TOP10 的交易对
+topk(10, depth_subscribers)
+
+# 各交易对买卖盘深度
+depth_cache_bid_levels - depth_cache_ask_levels
+
+# 缓存的交易对总数
+depth_symbols_cached
+```
+
+### 关键告警规则
+
+```yaml
+# alerts.yml
+groups:
+  - name: quote-depth
+    rules:
+      - alert: HighDepthLatency
+        expr: depth_update_latency_seconds{p99="0.99"} > 1
+        for: 1m
+        annotations:
+          summary: "Depth update P99 latency > 1s"
+      - alert: ZeroSubscribers
+        expr: depth_symbols_cached > 0 and sum(depth_subscribers) == 0
+        for: 30s
+        annotations:
+          summary: "No WebSocket subscribers despite cached data"
+```
